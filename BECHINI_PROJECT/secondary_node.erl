@@ -12,15 +12,27 @@
 -define(SERVER, ?MODULE).
 
   
-
+% (?) Qui l'utente non deve passare come argomento Primary_node ma in realtà occorre che venga recuperato direttaemente
+% 	  andando ad interagire con il server di Raffaele
 start_link(Primary_node) ->
+	% Start link arguments:
+	% - {local, ?SERVER} -> register the server locally associating the name via MACRO
+	% - The second argument is the name of the callback module where the callback functions are located, in this case is
+	%   is the current module
+	% - Primary_node is passed as argument to the callback function init
   gen_server:start_link({local, ?SERVER}, ?MODULE, Primary_node, []).
 
 init(Primary_node) ->
-  Neighbours_list=add_to_cluster(Primary_node),
+	% During the initialization phase the node must ask to the primary to add itself to the cluster of secondary nodes
+  Neighbours_list = add_to_cluster(Primary_node),
   io:format("List ~w~n", [Neighbours_list]),
+	% Start a periodic timer exploiting the send_after function
   erlang:send_after(?TIMEOUT_ALIVE, secondary_node, {ping_pong}), %%handled by handle_info callback
   Now = erlang:monotonic_time(millisecond),
+	% The state of the server is initialized and it contains:
+	% - The list of neighbours as provided by the primary node
+	% - A reference to the Primary_node as provided by the user
+	% - Now (?) Perchè
   {ok,{Neighbours_list, Primary_node, Now}}.  
  
 
@@ -110,13 +122,11 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact}) -> 
   end.
   
   
-  
-%%callback from send_after, or in general all ! messages
 handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact}) ->
-
+	% The handle_info callback is for messages that don’t originate from the functions call and cast of the gen_server
+	% module. In our case is used for the timer implementation via send_after.
   case Info of
-  
-	{ping_pong} ->
+		{ping_pong} ->
       Result = check_alives([{Primary_node,Primary_last_contact}]),
 	  case Result == [] of
 		false -> 
@@ -225,8 +235,11 @@ check_alives(Neigh_list) ->
   [{RM_id, Last_time_contact} || {RM_id, Last_time_contact} <- Neigh_list,
                                   Now - Last_time_contact < 2 * ?TIMEOUT_ALIVE].
   
-%% IL METODO SERVE A MANDARE UNA RICHIESTA DI AGGREGAZIONE AL NODO PRIMARIO. L'ARGOMENTO È IL NODO PRIMARIO.
+% (?) Qui perchè non c'è il timeout
 add_to_cluster(Node) ->
+	% Via gen_server:call that makes a synchronous request to the process with Name = primary_node and located on the node
+	% passed as argument(in this case the primary node provided by the command line). This function returns the list of
+	% neighbours as provided by the primary node.
   gen_server:call({primary_node, Node}, {neighbour_add, node()}).
 								  
 	

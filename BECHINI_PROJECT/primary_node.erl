@@ -58,14 +58,22 @@
 
 
 start_link(Neighbours_list) ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, Neighbours_list, []).
+  % Start link arguments:
+	% - {local, ?SERVER} -> register the server locally associating the name via MACRO
+	% - The second argument is the name of the callback module where the callback functions are located, in this case is
+	%   is the current module
+	% - Neighbours_list is passed as argument to the callback function init
+	gen_server:start_link({local, ?SERVER}, ?MODULE, Neighbours_list, []).
 
 init(Neighbours_list) ->
-  
+  % If name registration succeeds this function will be called
   io:format("Primary node has been created ~n~n"),
-  erlang:send_after(?TIMEOUT_ALIVE, primary_node, {check_alives}), %%handled by handle_info callback
+	% send_after start a timer, when the timer expires, the message check_alive and send_heartbeat will be
+	% sent to the process called primary node. Note that the usage of send_after is recommended for efficiency
+	% purpose.
+  erlang:send_after(?TIMEOUT_ALIVE, primary_node, {check_alive}), %%handled by handle_info callback
   erlang:send_after(?TIMEOUT_ALIVE, primary_node, {send_heartbeat}), %%handled by handle_info callback
-
+	% The function is expected to return {ok,State} where State is the internal state of the gen_server
   {ok,Neighbours_list}. 
   
 elect(Neighbours_list) ->
@@ -75,18 +83,12 @@ elect(Neighbours_list) ->
 
 	start_link(Neighbours_list).
   
-handle_cast(Request, Neigh_list) -> %Asynchronous request
- %% io:format("Cast requested: Request = ~w ~n",[Request]), % DEBUG
-  % format_state(State), % DEBUG
+handle_cast(Request, Neigh_list) ->
+  % Whenever the gen_server process receive a request sent using cast/2 this function is called to handle such request
   case Request of
-  
     {heartbeat,Neigh} when is_atom(Neigh) ->
-  %%    io:format("[primary node] received a heartbeat mex from RM: ~w~n", [Neigh]), % DEBUG
-	  New_Neigh_list=update_last_contact(Neigh,Neigh_list),
-      {
-        noreply,
-        New_Neigh_list
-      };
+	  	New_Neigh_list = update_last_contact(Neigh,Neigh_list),
+      {noreply, New_Neigh_list};
 
     %% catch all clause
     _ ->
@@ -95,97 +97,107 @@ handle_cast(Request, Neigh_list) -> %Asynchronous request
 
   end.
 
-
-
-handle_call(Request, From, Neigh_list) -> %Synchronous request
+handle_call(Request, From, Neigh_list) ->
+	% This function is called whenever a gen_server process receives a request sent using call, this function is called to
+	% handle the request.
   io:format("Call requested: Request = ~w ~n",[Request]), % DEBUG
-  %format_state(State), % DEBUG
   case Request of
-	%%UN NODO MANDA UNA RICHIESTA DI ADD AL PRIMARIO CHE LA INOLTRA AI SECONDARI
     {neighbour_add, New_Neigh} when is_atom(New_Neigh) ->
-	  Now = erlang:monotonic_time(millisecond),
-	  if 
-		Neigh_list == [] ->
-		
-		  New_Neigh_list = [{New_Neigh,Now}],
-		  Returned_Node_list=[X||{X,_} <- Neigh_list],
-		  io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]);
-		  
-		true ->
-		
-		  Node_list=[X||{X,_} <- Neigh_list], %%We only consider the first element in each tuple...
-		  Failed_Node_List = broadcast_call(Node_list,{neighbour_add_propagation,New_Neigh}),
-		  
-		  if 
-			Failed_Node_List == [] ->
-				io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]),
-				New_Neigh_list = Neigh_list ++ [{New_Neigh,Now}],
-				Returned_Node_list = Node_list;
-			true ->
-			
-				io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
-				
-				New_Neigh_list= get_diff(Neigh_list ++ [{New_Neigh,Now}],Failed_Node_List),
-				Returned_Node_list = [X||{X,_} <- get_diff(New_Neigh_list, [New_Neigh])],
-				io:format("[primary_node] New neighbors: ~w ~n", [New_Neigh_list])
+			% This message is received when a new secondary node wants to join the network, New_Neigh must be an atom
+	  	Now = erlang:monotonic_time(millisecond),
+	  	if
+				Neigh_list == [] ->
+					% If there aren't secondary node the primary only adds its to its neighbour list
+					New_Neigh_list = [{New_Neigh,Now}],
+					% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all
+					% the secondary server we take only the list of (?) via list comprehensions
+					Returned_Node_list=[X||{X,_} <- Neigh_list],
+		  		io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]);
+				true ->
+					% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all
+					% the secondary server we take only the list of (?) via list comprehensions
+					Node_list=[X||{X,_} <- Neigh_list],
+		  		% The function broadcast_call returns the the list of nodes that failed during the neighbour_add_propagation
+					% message propagation
+					Failed_Node_List = broadcast_call(Node_list,{neighbour_add_propagation,New_Neigh}),
+					if
+						Failed_Node_List == [] ->
+							io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]),
+							New_Neigh_list = Neigh_list ++ [{New_Neigh,Now}],
+							% The Returned_Node_list represent the list that is returned to the new node that wants to join the network,
+							% this list contains all the secondary nodes that already have joined the network
+							Returned_Node_list = Node_list;
+						true ->
+							io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
+							% The nodes that have failed are removed from the list of neighbour
+							New_Neigh_list= get_diff(Neigh_list ++ [{New_Neigh,Now}],Failed_Node_List),
+							% In order to obtain the list of neighbours of the new node this node is subtracted
+							% from the new list of neighbours
+							Returned_Node_list = [X||{X,_} <- get_diff(New_Neigh_list, [New_Neigh])],
+							io:format("[primary_node] New neighbors: ~w ~n", [New_Neigh_list])
+					end
+			end,
+			% The handle_call must return {reply,Reply,NewState} so that the Reply will be given back to From as the return
+			% value of call, in this case Returned_Node_list represent the list of secondary nodes without the nodes that
+			% sends the request. The gen_server process then continues executing updating its state with New_Neigh_list
+      {reply, Returned_Node_list, New_Neigh_list};
 
-				
-			end
-		  
-		end,
-      {
-        reply,   
-		Returned_Node_list,			%%Il nuovo nodo riceve la lista dei nodi, escluso sè stesso
-        New_Neigh_list	
-      };
-
-  
-	{get_map, Lat, Lng, Radius} ->
-		Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
-		io:format("[primary_node] received a get_map request. Point: ~p, Radius: ~p ~n", [Point, Radius]),
+		{get_map, Lat, Lng, Radius} ->
+			% This message is a request to retrieve all the points that belongs to a circle pointed in
+			% Lat an Lng and with a radius equal to Radius. Notice that the all the reads, according to
+			% primary-secondary paradigm, are served by the primary
+			Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
+			io:format("[primary_node] received a get_map request. Point: ~p, Radius: ~p ~n", [Point, Radius]),
 
 	    Query="SELECT * FROM points WHERE ST_Distance(geog, ST_GeographyFromText('" ++ Point ++ "')) < " ++ Radius ++ ";",
 	    odbc:start(),
 	    {ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgres;UID=postgres;PWD=admin",[]),
-        Result=odbc:sql_query(Ref, Query),
-		io:format("~p~n", [Result]),
-		io:format("[primary_node] GET MAP operation correctly performed.~n"),
-		%%TODO METTERE CASE OF RESULT E RESTITUIRE SUCCESS/ERROR
-		{reply, Result, Neigh_list};
+			Result=odbc:sql_query(Ref, Query),
+			io:format("~p~n", [Result]),
+			io:format("[primary_node] GET MAP operation correctly performed.~n"),
+			% TODO METTERE CASE OF RESULT E RESTITUIRE SUCCESS/ERROR
+			{reply, Result, Neigh_list};
 	
-	{add_point, Type , Lat, Lng, Max_speed} ->
-		Point="POINT(" ++ Lat ++ "," ++ Lng ++ ")",
-		io:format("[primary_node] received an add_point request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),
-		if 
-		Neigh_list =/= [] ->
-		
-		  Node_list=[X||{X,_} <- Neigh_list], %%We only consider the first element in each tuple...
-		  
-			Failed_Node_List = broadcast_call(Node_list,{add_point, Type , Lat, Lng, Max_speed}),
-			if 
-				Failed_Node_List == [] ->
-					io:format("[primary_node] ADD POINT operation correctly performed.~n"),
-					New_Neigh_list = Neigh_list;
-				
-				true ->
-					io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
-					New_Neigh_list= get_diff(Neigh_list,Failed_Node_List)
-			end,
-			  		  	  
-		   Query="INSERT INTO points(type,point,max_speed) VALUES ('" ++ Type ++ "', '" ++ Point ++ "', '" ++ Max_speed ++ "');",
-		   odbc:start(),
-		   {ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgres;UID=postgres;PWD=admin",[]),
-		   Result=odbc:sql_query(Ref, Query),
-		   case Result of 
-				{updated,1} -> 
-					io:format("[primary node] Primary node has correctly added the point ...~n~n"), % DEBUG
-					{reply, success, New_Neigh_list};
-				_ ->
-					io:format("[primary node] An error occured with primary node during the point addition  ...~n~n"), % DEBUG
-					{reply, error, New_Neigh_list}
-		    end;
-
-
+		{add_point, Type , Lat, Lng, Max_speed} ->
+			% This message is received when a there is the need to add a new point
+			Point="POINT(" ++ Lat ++ "," ++ Lng ++ ")",
+			io:format("[primary_node] received an add_point request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),
+			% First the point is inserted into the primary database
+			Query="INSERT INTO points(type,point,max_speed) VALUES ('" ++ Type ++ "', '" ++ Point ++ "', '" ++ Max_speed ++ "');",
+			odbc:start(),
+			{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgres;UID=postgres;PWD=admin",[]),
+			Result=odbc:sql_query(Ref, Query),
+			% Then the update is propagated to each secondary node(if any)
+			if
+				Neigh_list =/= [] ->
+					% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all
+					% the secondary server we take only the list of (?) via list comprehensions
+					Node_list=[X||{X,_} <- Neigh_list],
+					% Here the update is propagated to all the secondary nodes, the result of the broadcast_call
+					% is the list of nodes that have failed during the propagation of the add_point message
+					Failed_Node_List = broadcast_call(Node_list,{add_point, Type , Lat, Lng, Max_speed}),
+					if
+						Failed_Node_List == [] ->
+							% Case when no nodes failed during the propagation of the add_point message
+							io:format("[primary_node] ADD POINT operation correctly performed.~n"),
+							New_Neigh_list = Neigh_list;
+						true ->
+							% Otherwise the primary get the new list of neighbours
+							io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
+							New_Neigh_list= get_diff(Neigh_list,Failed_Node_List)
+					end,
+					case Result of
+						{updated,1} ->
+							io:format("[primary node] Primary node has correctly added the point ...~n~n"), % DEBUG
+							% The handle_call must return {reply,Reply,NewState} so that the Reply will be given back to From as the return
+							% value of call, in this case the primary return the atom success to indicate that all the secondary have
+							% updated their database
+							{reply, success, New_Neigh_list};
+						_ ->
+							io:format("[primary node] An error occured with primary node during the point addition  ...~n~n"), % DEBUG
+							{reply, error, New_Neigh_list}
+					end;
+		% (?) Questa parte può essere tolta dall'if tanto va sempre eseguita
 		true ->
 		   Query="INSERT INTO points(type,point,max_speed) VALUES ('" ++ Type ++ "', '" ++ Point ++ "', '" ++ Max_speed ++ "');",
 		   odbc:start(),
@@ -206,75 +218,75 @@ handle_call(Request, From, Neigh_list) -> %Synchronous request
       io:format("[primary node] WARNING: bad request format~n"),
       {reply, bad_request, Neigh_list}
   end.
-  
-  
-  
-%%callback from send_after, or in general all ! messages
-handle_info(Info, Neigh_list) ->
-  case Info of
-	{send_heartbeat} ->
-	  io:format("------------------------~n"),
-      io:format("[primary node] heartbeat is sent to secondary nodes...~n~n"), % DEBUG
-	  io:format("-------------------~n"),
 
-	  Node_list=[X||{X,_} <- Neigh_list], %%We only consider the first element in each tuple...
-	  broadcast_cast(Node_list,{heartbeat,node()}),
-      erlang:send_after(?TIMEOUT_ALIVE, primary_node, {send_heartbeat}),
-      {
-        noreply,
-        Neigh_list
-      };
+handle_info(Info, Neigh_list) ->
+  % The handle_info callback is for messages that don’t originate from the functions call and cast of the gen_server
+	% module. In our case is used for the timer implementation via send_after.
+	case Info of
+		{send_heartbeat} ->
+			% This means that the timer associated with the heartbeat send expires
+	  	io:format("------------------------~n"),
+      io:format("[primary node] heartbeat is sent to secondary nodes...~n~n"), % DEBUG
+	  	io:format("------------------------~n"),
+			% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all the
+			% secondary server we take only the list of (?) via list comprehensions
+			Node_list=[X||{X,_} <- Neigh_list],
+			% A message containing the heartbeat atom and the name of the local node
+	  	broadcast_cast(Node_list,{heartbeat,node()}),
+      % The timer for the send heartbeat task is then restarted
+			erlang:send_after(?TIMEOUT_ALIVE, primary_node, {send_heartbeat}),
+			% The function must return {noreply,NewState}
+      {noreply, Neigh_list};
   
-    {check_alives} ->
-  %%    io:format("Timeout expired: time to check rms alives ~n"), % DEBUG
-      erlang:send_after(?TIMEOUT_ALIVE, primary_node, {check_alives}),
-      Alive_Neigh_list = check_alives(Neigh_list),
-	  Alive_Node_list=[X||{X,_} <- Alive_Neigh_list], %%We only consider the first element in each tuple...
-	  lists:foreach( fun(H) -> io:format("~p~n", [H]) end, Alive_Neigh_list),
-	  Dead_Neigh_list= get_diff(Neigh_list,Alive_Node_list),
-	  io:format("---------SECONDARY NODES--------~n"),
-		
-	  case Dead_Neigh_list == [] of
-		false -> 
-			
-			lists:foreach( fun(H) -> io:format("~p HAS BEEN REMOVED FROM THE CLUSTER...~n", [H]) end, Dead_Neigh_list),  %%DEBUG
-			lists:foreach( fun(H) -> io:format("~p~n", [H]) end, Alive_Neigh_list),
-			io:format("~n"),
-			Dead_Node_list=[X||{X,_} <- Dead_Neigh_list], 
-			Failed_Node_List = broadcast_call(Alive_Node_list,{neighbour_del_propagation,Dead_Node_list}),
-			
-			if 
-			Failed_Node_List == [] ->
-			
-				io:format("[primary_node] Nodes have been correctly deleted.~n");
-				
-				
-			true ->
-			
-				io:format("[primary_node] Following nodes have failed during delete propagation and will be removed: ~w ~n", [Failed_Node_List])
-				
-			end,
-			
-			New_Neigh_list = get_diff(Alive_Neigh_list,Failed_Node_List),
-			{
-				noreply,
-				New_Neigh_list
-			};
-		true ->
-			case Alive_Neigh_list == [] of
-				false -> 
-					lists:foreach( fun(H) -> io:format("~p~n", [H]) end, Alive_Neigh_list);  %%DEBUG
+    {check_alive} ->
+			% The timer for the check alive task is restarted
+      erlang:send_after(?TIMEOUT_ALIVE, primary_node, {check_alive}),
+			% From the neighbours list we remove the ones that have not contacted the primary recently
+      Alive_Neigh_list = check_alive(Neigh_list),
+			% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all the
+			% secondary server we take only the list of (?) via list comprehensions
+			Alive_Node_list=[X||{X,_} <- Alive_Neigh_list],
+			% Print all the elements of the Alive_Neigh_list
+	  	lists:foreach(fun(H) -> io:format("~p~n", [H]) end, Alive_Neigh_list),
+	  	Dead_Neigh_list= get_diff(Neigh_list,Alive_Node_list),
+	  	io:format("---------SECONDARY NODES--------~n"),
+			case Dead_Neigh_list == [] of
+				false ->
+					% if at least one node fails primary propagates to all the secondary the neighbour_del_propagation in order to
+					% make them aware from the fact that one of its neighbour has failed.
+					lists:foreach( fun(H) -> io:format("~p HAS BEEN REMOVED FROM THE CLUSTER...~n", [H]) end, Dead_Neigh_list),  %%DEBUG
+					lists:foreach( fun(H) -> io:format("~p~n", [H]) end, Alive_Neigh_list),
+					io:format("~n"),
+					Dead_Node_list=[X||{X,_} <- Dead_Neigh_list],
+					% The message containing all the nodes that have failed is sent to the secondary nodes. The broadcast call
+					% returns the list of nodes that instead does not respond with an acknowledgment to the
+					% neighbour_del_propagation message.
+					Failed_Node_List = broadcast_call(Alive_Node_list,{neighbour_del_propagation,Dead_Node_list}),
+
+					if
+						Failed_Node_List == [] ->
+							% No node has failed during the propagation of the neighbour_del_propagation message
+							io:format("[primary_node] Nodes have been correctly deleted.~n");
+
+						true ->
+							io:format("[primary_node] Following nodes have failed during delete propagation and will be removed: ~w ~n", [Failed_Node_List])
+					end,
+
+					% Finally the state of the current server - the list of neighbour nodes alive -  is updated
+					New_Neigh_list = get_diff(Alive_Neigh_list,Failed_Node_List),
+					{noreply,	New_Neigh_list};
 				true ->
-					io:format("There are no secondary nodes...~n~n")
-				end,
-			io:format("~n"),
-			{
-				noreply,
-				Alive_Neigh_list
-			}
-		end;
-		
-    _Dummy ->
+					case Alive_Neigh_list == [] of
+						false ->
+							lists:foreach( fun(H) -> io:format("~p~n", [H]) end, Alive_Neigh_list);  %%DEBUG
+						true ->
+							io:format("There are no secondary nodes...~n~n")
+					end,
+					io:format("~n"),
+					{noreply,Alive_Neigh_list}
+			end;
+
+		_Dummy ->
       io:format("[dispatcher] WARNING: bad mex format in handle_info Format ~w ~n",[_Dummy]), % DEBUG
       {noreply, Neigh_list}
   end.
@@ -282,14 +294,11 @@ handle_info(Info, Neigh_list) ->
 terminate(_Reason, _State) ->
   ok.
   
-  
-  
-
-
-check_alives(Neigh_list) ->
+check_alive(Neigh_list) ->
   Now = erlang:monotonic_time(millisecond),
-  [{RM_id, Last_time_contact} || {RM_id, Last_time_contact} <- Neigh_list,
-                                  Now - Last_time_contact < 2 * ?TIMEOUT_ALIVE].
+	% Remove from the neighbours list the ones that have not contacted the primary server in the last 2 * TIMEOUT_ALIVE
+	% milliseconds, exploiting the list comprehension.
+  [{RM_id, Last_time_contact} || {RM_id, Last_time_contact} <- Neigh_list, Now - Last_time_contact < 2 * ?TIMEOUT_ALIVE].
   							  
 								  
 broadcast_call(_, {}) ->
@@ -298,69 +307,74 @@ broadcast_call(_, {}) ->
 
 broadcast_call(L, Msg) ->
 	io:format("CHIAMO broadcast_call(L, Msg)"), % DEBUG
-
+	% broadcast_call(L, Msg, []) returns -if there are- the list of nodes that have failed during the secondary_node
+	% message broadcasting.
 	Nodes_to_delete = broadcast_call(L, Msg, []),
 	io:format("@@@@NODE_TO_DELETE  ~w  ~n",[Nodes_to_delete]), % DEBUG
 	if
 		Nodes_to_delete == [] ->
-		
+			% If no nodes have failed during the propagation of the message broadcast_call ends
 			[];
 		  
 		true ->
-			New_list = get_diff(L, [Nodes_to_delete]),
-			X = [Nodes_to_delete] ++ broadcast_call(New_list, {neighbour_del_propagation, Nodes_to_delete}),
+			% Obtain the new list of alive nodes subtracting the ones that have failed
+			Alive_nodes = get_diff(L, [Nodes_to_delete]),
+			% Propagate the neighbour_del_propagation in order to inform the alive neighbours that some nodes have just failed
+			X = [Nodes_to_delete] ++ broadcast_call(Alive_nodes, {neighbour_del_propagation, Nodes_to_delete}),
 			io:format("@@@@NODES_TO_DELETE   ~w  ~n",[X]), % DEBUG
+			% The list of all the new failed nodes is returned
 			X
-		  
-	  end.
+	end.
   
 broadcast_call([], Msg, L) ->
 	io:format("CHIAMO broadcast_call([], Msg, L)"), % DEBUG
-
 	L;
 	
 broadcast_call([H|T], Msg, L) ->
-    Reply =(catch gen_server:call({secondary_node, H}, Msg, ?CALL_TIMEOUT)),
+	% Via gen_server:call the server makes a synchronous call to the server with Name = secondary_node and located at the
+	% node contained inside the list passed as argument(list of alive nodes). In particular it sends a request and waits
+	% until a reply arrives or a time-out occurs.
+	% catch(?)
+	Reply =(catch gen_server:call({secondary_node, H}, Msg, ?CALL_TIMEOUT)),
 	io:format("Call reply: Reply = ~w  ~n",[Reply]), % DEBUG
 	case Reply of 
-	
+
 		update_neighbours_reply ->
 			broadcast_call(T, Msg, L);
-		
+
 		{add_point_reply, Result} ->
-		
-			case Result of 
+			case Result of
 		
 				{updated,1} -> 
 					io:format("[primary node] RM ~w has correctly added the point ...~n~n", [H]), % DEBUG
 					broadcast_call(T, Msg, L);
 				_ ->
 					io:format("[primary node] An error occured with RM ~w during the point addition  ...~n~n", [H]), % DEBUG
+					% Remove H from the list of alive nodes (?)
 					broadcast_call(T, Msg, L)
 			end;
 			
 		_ ->
 			io:format("[primary node] An error has occured. Node ~w must be removed from the list of secondary nodes. ~n", [H]),
-		%%	Dead_Node_list=[X||{X,_} <- Dead_Neigh_list], 
-		%%	broadcast_call(Node_list,{neighbour_del_propagation,Dead_Node_list}),
-		%%	brodcast_call(, ),
+			% Stores the current node, that has failed, in order to return it to at the end of the broadcast call
 			broadcast_call(T, Msg, L ++ H)
 		end.
 	
 	
 broadcast_cast(_, {}) ->
-    empty_message;
+	empty_message;
   
 broadcast_cast([], Msg) ->
 	ok;
 	
 broadcast_cast([H|T], Msg) ->
-    gen_server:cast({secondary_node, H}, Msg),
+	% gen_server:cast sends an asynchronous request to the server whose name is secondary_node and is located at node H
+	gen_server:cast({secondary_node, H}, Msg),
+	% In an iterative manner the message is sent to all the nodes contained in the list elements
 	broadcast_cast(T, Msg).
-		
-  
   
 update_last_contact(RM_id_target,Neighbours_list) ->
+	% This function updates the information about the last contact with the node passed as argument
   Now = erlang:monotonic_time(millisecond),
   New_Neighbours_list = [{RM_id, Last_time_contact} || {RM_id, Last_time_contact} <- Neighbours_list, RM_id_target /= RM_id],
   New_Neighbours_list ++ [{RM_id_target, Now}]. 
@@ -372,18 +386,19 @@ get_diff([],L2) ->
 get_diff([H|T],L2) ->
 	if 
 		is_tuple(H) ->
-			
+			% If the current element under analysis is a tuple only the first element is taken - the server name
 			Name = element(1,H);
-			
 		true ->
 			Name = H
-		end,
+	end,
 	io:format("  L2 :  ~w~n", [L2]),
 	io:format("  H , NAME :  ~p , ~p~n", [H, Name]),
+	% lists:member returns true if the the element Name belongs to the list L2
 	case lists:member(Name, L2) of
 		true ->
 			get_diff(T,L2);
 		false ->
+			% If the element does not belong to the second list its added to the list of different elements
 			[H] ++ get_diff(T,L2)
 	end.
 	
