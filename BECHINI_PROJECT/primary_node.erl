@@ -73,6 +73,8 @@ init(Neighbours_list) ->
 	% purpose.
   erlang:send_after(?TIMEOUT_ALIVE, primary_node, {check_alive}), %%handled by handle_info callback
   erlang:send_after(?TIMEOUT_ALIVE, primary_node, {send_heartbeat}), %%handled by handle_info callback
+	% Signal via TCP the information about this primary server
+	% update_primary(),
 	% The function is expected to return {ok,State} where State is the internal state of the gen_server
   {ok,Neighbours_list}. 
   
@@ -80,11 +82,13 @@ elect(Neighbours_list) ->
 
 	gen_server:call({secondary_node, node()}, stop, ?CALL_TIMEOUT),
 	io:format("Secondary node has been terminated ~n~n"),
-
+	% Signal via TCP the information about this primary server
+	% update_primary(),
 	start_link(Neighbours_list).
   
 handle_cast(Request, Neigh_list) ->
-  % Whenever the gen_server process receive a request sent using cast/2 this function is called to handle such request
+  % Whenever the gen_server process receive a request sent using cast/2 this function is called to
+	% handle such request
   case Request of
     {heartbeat,Neigh} when is_atom(Neigh) ->
 	  	New_Neigh_list = update_last_contact(Neigh,Neigh_list),
@@ -98,8 +102,8 @@ handle_cast(Request, Neigh_list) ->
   end.
 
 handle_call(Request, From, Neigh_list) ->
-	% This function is called whenever a gen_server process receives a request sent using call, this function is called to
-	% handle the request.
+	% This function is called whenever a gen_server process receives a request sent using call, this
+	% function is called to handle such request.
   io:format("Call requested: Request = ~w ~n",[Request]), % DEBUG
   case Request of
     {neighbour_add, New_Neigh} when is_atom(New_Neigh) ->
@@ -137,9 +141,10 @@ handle_call(Request, From, Neigh_list) ->
 							io:format("[primary_node] New neighbors: ~w ~n", [New_Neigh_list])
 					end
 			end,
-			% The handle_call must return {reply,Reply,NewState} so that the Reply will be given back to From as the return
-			% value of call, in this case Returned_Node_list represent the list of secondary nodes without the nodes that
-			% sends the request. The gen_server process then continues executing updating its state with New_Neigh_list
+			% The handle_call must return {reply,Reply,NewState} so that the Reply will be given back to From
+			% as the return value of call, in this case Returned_Node_list represent the list of secondary
+			% nodes without the nodes that sends the request. The gen_server process then continues executing
+			% updating its state with New_Neigh_list
       {reply, Returned_Node_list, New_Neigh_list};
 
 		{get_map, Lat, Lng, Radius} ->
@@ -386,7 +391,7 @@ get_diff([],L2) ->
 get_diff([H|T],L2) ->
 	if 
 		is_tuple(H) ->
-			% If the current element under analysis is a tuple only the first element is taken - the server name
+			% If the current element under analysis is a tuple only the first element is taken: the server name
 			Name = element(1,H);
 		true ->
 			Name = H
@@ -402,7 +407,12 @@ get_diff([H|T],L2) ->
 			[H] ++ get_diff(T,L2)
 	end.
 	
-
+% Function that signal via TCP socket that a new primary was elected
+update_primary() ->
+	SomeHostInNet = "localhost",
+	{ok,Socket} = gen_tcp:connect(SomeHostInNet,?PORT,[binary,{packet,0}]),
+	ok = gen_tcp:send(Socket, pid_to_list(self()) ++ ";" ++ atom_to_list(node())),
+	ok = gen_tcp:close(Socket).
  
 stop() ->
 	exit(whereis(?SERVER), ok).
