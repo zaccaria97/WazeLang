@@ -47,7 +47,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/1, init/1, elect/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, stop/0]).
+-export([add_point/1, get_map/1, start_link/1, init/1, elect/1, elect/0, handle_call/3, handle_cast/2, handle_info/2, terminate/2, stop/0]).
 
 
 -include("utility.hrl").
@@ -55,6 +55,13 @@
 -define(SERVER, ?MODULE).
 
 -record(rm_state,{neighbours_list}).
+
+
+get_map({Lat, Lng, Radius}) ->
+	Result = gen_server:call(primary_node, {get_map, Lat, Lng, Radius}).
+
+add_point({Type, Lat, Lng, Max_speed}) ->
+	gen_server:call(primary_node, {add_point, Type, Lat, Lng, Max_speed}).
 
 
 start_link(Neighbours_list) ->
@@ -78,13 +85,50 @@ init(Neighbours_list) ->
 	% The function is expected to return {ok,State} where State is the internal state of the gen_server
   {ok,Neighbours_list}. 
   
-elect(Neighbours_list) ->
+elect() ->
+	Reply =(catch gen_server:call({bully_algorithm, node()}, stop, ?CALL_TIMEOUT)),
+	io:format("Secondary node has been terminated ~n~n"),
+	start_link([]).
+  
+elect(Node_list) ->
 
-	gen_server:call({secondary_node, node()}, stop, ?CALL_TIMEOUT),
+	gen_server:call({bully_algorithm, node()}, stop, ?CALL_TIMEOUT),
 	io:format("Secondary node has been terminated ~n~n"),
 	% Signal via TCP the information about this primary server
 	% update_primary(),
-	start_link(Neighbours_list).
+	
+	
+	% Here the latest added point is propagated to all secondary nodes, the result of the broadcast_call
+	% is the list of nodes that have failed during the propagation of the check_db_consistency message. 
+	Query="SELECT * FROM points ORDER BY timestamp DESC LIMIT 1;",
+	
+	Node_Id = get_node_id(), 
+	odbc:start(),
+	{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
+
+	Result=odbc:sql_query(Ref, Query),
+	io:format("~p~n", [Result]),  %%DEBUG
+	{_,_,L} = Result,
+	io:format("~p~n", [L]),  %%DEBUG
+	[{Max_speed, Type, Lat, Lng}] = L,
+	io:format("~p ~p ~p ~p ~n", [Max_speed, Type, Lat, Lng]),
+	
+	Failed_Node_List = broadcast_call(Node_list,{check_db_consistency, Max_speed, Type , Lat, Lng}),
+	if
+		Failed_Node_List == [] ->
+			% Case when no nodes failed during the propagation of the check_db_consistency message
+			io:format("[primary_node] check_db_consistency operation correctly performed.~n"),
+			New_Node_list = Node_list;
+		true ->
+			% Otherwise the primary get the new list of neighbours
+			io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
+			New_Node_list= get_diff(Node_list,Failed_Node_List)
+	end,
+					
+
+	Now = erlang:monotonic_time(millisecond),
+	New_Neighbours_list = [{X, Now} || X <- New_Node_list],
+	start_link(New_Neighbours_list).
   
 handle_cast(Request, Neigh_list) ->
   % Whenever the gen_server process receive a request sent using cast/2 this function is called to
@@ -104,59 +148,70 @@ handle_cast(Request, Neigh_list) ->
 handle_call(Request, From, Neigh_list) ->
 	% This function is called whenever a gen_server process receives a request sent using call, this
 	% function is called to handle such request.
-  io:format("Call requested: Request = ~w ~n",[Request]), % DEBUG
-  case Request of
+	io:format("Call requested: Request = ~w ~n",[Request]), % DEBUG
+	case Request of
     {neighbour_add, New_Neigh} when is_atom(New_Neigh) ->
 			% This message is received when a new secondary node wants to join the network, New_Neigh must be an atom
 	  	Now = erlang:monotonic_time(millisecond),
 	  	if
-				Neigh_list == [] ->
-					% If there aren't secondary node the primary only adds its to its neighbour list
-					New_Neigh_list = [{New_Neigh,Now}],
-					% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all
-					% the secondary server we take only the list of (?) via list comprehensions
-					Returned_Node_list=[X||{X,_} <- Neigh_list],
-		  		io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]);
-				true ->
-					% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all
-					% the secondary server we take only the list of (?) via list comprehensions
-					Node_list=[X||{X,_} <- Neigh_list],
-		  		% The function broadcast_call returns the the list of nodes that failed during the neighbour_add_propagation
-					% message propagation
-					Failed_Node_List = broadcast_call(Node_list,{neighbour_add_propagation,New_Neigh}),
-					if
-						Failed_Node_List == [] ->
-							io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]),
-							New_Neigh_list = Neigh_list ++ [{New_Neigh,Now}],
-							% The Returned_Node_list represent the list that is returned to the new node that wants to join the network,
-							% this list contains all the secondary nodes that already have joined the network
-							Returned_Node_list = Node_list;
-						true ->
-							io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
-							% The nodes that have failed are removed from the list of neighbour
-							New_Neigh_list= get_diff(Neigh_list ++ [{New_Neigh,Now}],Failed_Node_List),
-							% In order to obtain the list of neighbours of the new node this node is subtracted
-							% from the new list of neighbours
-							Returned_Node_list = [X||{X,_} <- get_diff(New_Neigh_list, [New_Neigh])],
-							io:format("[primary_node] New neighbors: ~w ~n", [New_Neigh_list])
-					end
-			end,
-			% The handle_call must return {reply,Reply,NewState} so that the Reply will be given back to From
-			% as the return value of call, in this case Returned_Node_list represent the list of secondary
-			% nodes without the nodes that sends the request. The gen_server process then continues executing
-			% updating its state with New_Neigh_list
-      {reply, Returned_Node_list, New_Neigh_list};
+			Neigh_list == [] ->
+				% If there aren't secondary node the primary only adds its to its neighbour list
+				New_Neigh_list = [{New_Neigh,Now}],
+				% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all
+				% the secondary server we take only the list of (?) via list comprehensions
+				Returned_Node_list=[X||{X,_} <- Neigh_list],
+				io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]);
+			true ->
+				% Neigh_list is a list of couple <(?),network_join_instant>, since we have to send an heartbeat message to all
+				% the secondary server we take only the list of (?) via list comprehensions
+				Node_list=[X||{X,_} <- Neigh_list],
+				% The function broadcast_call returns the the list of nodes that failed during the neighbour_add_propagation
+				% message propagation
+				Failed_Node_List = broadcast_call(Node_list,{neighbour_add_propagation,New_Neigh}),
+				if
+					Failed_Node_List == [] ->
+						io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]),
+						New_Neigh_list = Neigh_list ++ [{New_Neigh,Now}],
+						% The Returned_Node_list represent the list that is returned to the new node that wants to join the network,
+						% this list contains all the secondary nodes that already have joined the network
+						Returned_Node_list = Node_list;
+					true ->
+						io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
+						% The nodes that have failed are removed from the list of neighbour
+						New_Neigh_list= get_diff(Neigh_list ++ [{New_Neigh,Now}],Failed_Node_List),
+						% In order to obtain the list of neighbours of the new node this node is subtracted
+						% from the new list of neighbours
+						Returned_Node_list = [X||{X,_} <- get_diff(New_Neigh_list, [New_Neigh])],
+						io:format("[primary_node] New neighbors: ~w ~n", [New_Neigh_list])
+			end
+		end,
+		Query="SELECT * FROM points;",
+		Node_Id = get_node_id(), 
+		odbc:start(),
+		{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
+		{_,_,Result}=odbc:sql_query(Ref, Query),
+		io:format("~p~n", [Result]),
+		
+		% The handle_call must return {reply,Reply,NewState} so that the Reply will be given back to From
+		% as the return value of call, in this case Returned_Node_list represent the list of secondary
+		% nodes without the nodes that sends the request, and Result is the list of nodes stored in DB. The gen_server process then continues executing
+		% updating its state with New_Neigh_list 
+		
+        {reply, {Returned_Node_list, Result}, New_Neigh_list};
 
 		{get_map, Lat, Lng, Radius} ->
 			% This message is a request to retrieve all the points that belongs to a circle pointed in
 			% Lat an Lng and with a radius equal to Radius. Notice that the all the reads, according to
 			% primary-secondary paradigm, are served by the primary
 			Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
-			io:format("[primary_node] received a get_map request. Point: ~p, Radius: ~p ~n", [Point, Radius]),
+			io:format("[primary_node] received a get_map request. Point: ~p, Radius: ~p ~n", [Point, Radius]), 
+			
+			Query="SELECT * FROM points WHERE ST_Distance(ST_GeographyFromText(CONCAT('POINT(', lat,' ', lng,')')), ST_GeographyFromText('" ++ Point ++ "')) < " ++ Radius ++ ";",
+			
+			Node_Id = get_node_id(), 
+			odbc:start(),
+			{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
 
-	    Query="SELECT * FROM points WHERE ST_Distance(geog, ST_GeographyFromText('" ++ Point ++ "')) < " ++ Radius ++ ";",
-	    odbc:start(),
-	    {ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgres;UID=postgres;PWD=admin",[]),
 			Result=odbc:sql_query(Ref, Query),
 			io:format("~p~n", [Result]),
 			io:format("[primary_node] GET MAP operation correctly performed.~n"),
@@ -165,12 +220,14 @@ handle_call(Request, From, Neigh_list) ->
 	
 		{add_point, Type , Lat, Lng, Max_speed} ->
 			% This message is received when a there is the need to add a new point
-			Point="POINT(" ++ Lat ++ "," ++ Lng ++ ")",
-			io:format("[primary_node] received an add_point request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),
+			io:format("[primary_node] received an add_point request. Type: ~p, Point: POINT( ~p ~p ), Max speed: ~p~n", [Type, Lat, Lng, Max_speed]),
 			% First the point is inserted into the primary database
-			Query="INSERT INTO points(type,point,max_speed) VALUES ('" ++ Type ++ "', '" ++ Point ++ "', '" ++ Max_speed ++ "');",
+			
+			Query="INSERT INTO points(type,lat,lng,max_speed, timestamp) VALUES ('" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', '" ++ Max_speed ++ "', NOW());",
+			Node_Id = get_node_id(), 
 			odbc:start(),
-			{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgres;UID=postgres;PWD=admin",[]),
+			{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
+
 			Result=odbc:sql_query(Ref, Query),
 			% Then the update is propagated to each secondary node(if any)
 			if
@@ -202,22 +259,11 @@ handle_call(Request, From, Neigh_list) ->
 							io:format("[primary node] An error occured with primary node during the point addition  ...~n~n"), % DEBUG
 							{reply, error, New_Neigh_list}
 					end;
-		% (?) Questa parte può essere tolta dall'if tanto va sempre eseguita
-		true ->
-		   Query="INSERT INTO points(type,point,max_speed) VALUES ('" ++ Type ++ "', '" ++ Point ++ "', '" ++ Max_speed ++ "');",
-		   odbc:start(),
-		   {ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgres;UID=postgres;PWD=zaccaria97",[]),
-		   Result=odbc:sql_query(Ref, Query),
-		   case Result of 
-				{updated,1} -> 
-					io:format("[primary node] Primary node has correctly added the point ...~n~n"), % DEBUG
-					{reply, success, Neigh_list};
-				_ ->
-					io:format("[primary node] An error occured with primary node during the point addition  ...~n~n"), % DEBUG
-					{reply, error, Neigh_list}
-		    end
-		end;
-  
+				true ->
+					io:format("[primary node] There are no secondary nodes to forward the ADD POINT operation. ~n~n") % DEBUG					
+			end,
+			{reply, Result, Neigh_list};
+
     %% catch all clause
     _ ->
       io:format("[primary node] WARNING: bad request format~n"),
@@ -292,7 +338,7 @@ handle_info(Info, Neigh_list) ->
 			end;
 
 		_Dummy ->
-      io:format("[dispatcher] WARNING: bad mex format in handle_info Format ~w ~n",[_Dummy]), % DEBUG
+      io:format("[primary node] WARNING: bad mex format in handle_info Format ~w ~n",[_Dummy]), % DEBUG
       {noreply, Neigh_list}
   end.
 
@@ -414,5 +460,8 @@ update_primary() ->
 	ok = gen_tcp:send(Socket, pid_to_list(self()) ++ ";" ++ atom_to_list(node())),
 	ok = gen_tcp:close(Socket).
  
+get_node_id() ->
+	Y = string:substr(atom_to_list(node()),5,2).
+
 stop() ->
 	exit(whereis(?SERVER), ok).
