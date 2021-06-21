@@ -2,7 +2,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/1]).
+-export([start_link/1, restart_link/1]).
 -export([init/1, handle_call/3,handle_cast/2, handle_info/2, terminate/2]).
 -export([get_new_primary_node_id/2,get_new_primary_node_id/3, add_to_cluster/1]).
 
@@ -22,10 +22,40 @@ start_link(Primary_node) ->
 	% - Primary_node is passed as argument to the callback function init
   gen_server:start_link({local, ?SERVER}, ?MODULE, Primary_node, []).
 
+restart_link(Primary_node) ->
+
+	gen_server:call({bully_algorithm, node()}, stop, ?CALL_TIMEOUT),
+	io:format("bully_algorithm has been terminated ~n~n"),
+	start_link(Primary_node).
+
+  
 init(Primary_node) ->
 	% During the initialization phase the node must ask to the primary to add itself to the cluster of secondary nodes
-  Neighbours_list = add_to_cluster(Primary_node),
+  {Neighbours_list, Points_to_Add} = add_to_cluster(Primary_node),
   io:format("List ~w~n", [Neighbours_list]),
+  io:format(" DB state: ~p~n", [Points_to_Add]),
+  
+    Node_Id = get_node_id(), 
+	odbc:start(),
+	{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
+			
+			
+	lists:foreach(fun(Point) ->
+
+			Select_Query="SELECT * FROM points where lat = '" ++ element(3, Point) ++ "' and lng = '" ++ element(4, Point) ++ "';",
+			Result=odbc:sql_query(Ref, Select_Query),
+			io:format(" ~p~n",[Result]),
+
+			if 
+				element(3,Result) == [] ->
+					Insert_Query="INSERT INTO points(max_speed,type,lat,lng,timestamp) VALUES ('" ++ element(1, Point) ++ "', '" ++ element(2, Point) ++ "', '" ++ element(3, Point) ++ "', '" ++ element(4, Point) ++ "', NOW());",
+					odbc:sql_query(Ref, Insert_Query);
+				true ->
+					io:format("Point already present ~n")
+			end
+		end,
+	Points_to_Add),
+  
 	% Start a periodic timer exploiting the send_after function
   erlang:send_after(?TIMEOUT_ALIVE, secondary_node, {ping_pong}), %%handled by handle_info callback
   Now = erlang:monotonic_time(millisecond),
@@ -61,7 +91,6 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact}) ->
 	%Synchronous request
 	% This function is called whenever a gen_server process receives a request sent using call, this
 	% function is called to handle such request.
-  io:format("Call requested: Request = ~w From = ~w ~n",[Request, From]), % DEBUG
   case Request of
     {neighbour_add_propagation, New_Neigh} ->
       io:format("[secondary node] has received a new neighbour: ~w~n", [New_Neigh]),
@@ -90,16 +119,34 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact}) ->
 			end,
 			{reply,update_neighbours_reply,{New_Neigh_list, Primary_node, Primary_last_contact}};
 
-		{add_point, Body}  ->
-			% (?) Code che cos'è
-			io:format("[secondary node] must add the following point:  ~p~n", [Body]),  %%DEBUG
-	  	{Code,Geog}=Body,
-	  	Query="INSERT INTO positions VALUES ('" ++ Code ++ "', '" ++ Geog ++ "');",
-	  	odbc:start(),
-	  	{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgres;UID=postgres;PWD=admin",[]),
-	  	Result=odbc:sql_query(Ref, Query),
-			{reply,{add_point_reply,Result},{Neigh_list, Primary_node, Primary_last_contact}};
+	{add_point, Type , Lat, Lng, Max_speed}  ->
+		
+		Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
+		io:format("[secondary node] received an add_point request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
+		
+		Query="INSERT INTO points(type,lat,lng,max_speed, timestamp) VALUES ('" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', '" ++ Max_speed ++ "', NOW());",
+		
+		Node_Id = get_node_id(), 
+		odbc:start(),
+		{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
 
+		Result=odbc:sql_query(Ref, Query),
+		io:format("[secondary node] Query result ~p~n", [Result]),  %%DEBUG
+		{reply,{add_point_reply,Result},{Neigh_list, Primary_node, Primary_last_contact}};
+
+	{check_db_consistency, Max_speed, Type , Lat, Lng} ->
+	
+		Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
+		io:format("[secondary node] received a check_db_consistency request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
+		
+		Node_Id = get_node_id(), 
+		Query="INSERT INTO points(type,lat,lng,max_speed, timestamp) VALUES ('" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', '" ++ Max_speed ++ "', NOW());",
+		odbc:start(),
+		{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
+		Result=odbc:sql_query(Ref, Query),
+		
+		{reply,{check_db_consistency,Result},{Neigh_list, Primary_node, Primary_last_contact}};
+		
     %% catch all clause
     _ ->
       io:format("[secondary_node] WARNING: bad request format ~n"),
@@ -115,7 +162,7 @@ handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact}) ->
 			% In this case the secondary check if the primary is still alive i.e. the primary has contacted
 			% the secondary in the last 2 * TIMEOUT milliseconds
 			Result = check_alives([{Primary_node,Primary_last_contact}]),
-	  	case Result == [] of
+			case Result == [] of
 				false ->
 					% Case primary is still alive
 					io:format("[secondary node] Primary node is still alive... ~n"), % DEBUG
@@ -137,45 +184,13 @@ handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact}) ->
 				true ->
 					% Case the primary has failed => election mechanism must start
 					io:format("[secondary node] primary node has failed! Election mechanism is started... ~n"), % DEBUG
-					Candidates_list = Neigh_list ++ [node()],
-					io:format("@@@@@Candidates_list ~w~n",[Candidates_list]), % DEBUG
-					% atom_to_list return the text representation of the atom Node_name
-					% substr(String, Start, Length) returns a substring of String that starts at position Start
-					% The node name format that we expect is nodexx@localhost where xx are two digits
-					Nodes_id = [string:substr(atom_to_list(Node_name),5,2) || Node_name <- Candidates_list],
-					% list_to_integer(String) returns an integer whose text representation is String
-					% then this list is sorted.
-					Sorted_nodes_id = lists:sort([list_to_integer(String_id) || String_id <- Nodes_id]),
-					Y = list_to_integer(string:substr(atom_to_list(Primary_node),5,2)),
-					io:format("@@@@@ ~w    ~w     ~w ~n",[Y, Sorted_nodes_id, length(Sorted_nodes_id)]), % DEBUG
-					% (?)
-					New_Primary_node_id = get_new_primary_node_id(Y, Sorted_nodes_id),
-					io:format("----- ~w  ~w     ~w~n",[Sorted_nodes_id, New_Primary_node_id, Candidates_list]), % DEBUG
-					% lists:nth(N,List) returns the Nth element of the list, in this case is used in order to obtain the
-					% name of the node whose identifier was obtained in the previous steps
-					New_Primary_node_name = lists:nth(1,[Node_name || Node_name <- Candidates_list,
-													list_to_integer(string:substr(atom_to_list(Node_name),5,2)) == New_Primary_node_id]),
-					io:format("CANDIDATES: ~w ~n",[Candidates_list]), % DEBUG
-					io:format("NEW PRIMARY ~w ~n",[New_Primary_node_name]), % DEBUG
-					if
-						New_Primary_node_name == node() ->
-							% Case this secondary node is the one that has to began the new primary
-							io:format("[secondary node] Turning to primary node.... ~n"), % DEBUG
-							% In Erlang a new process is created by calling the function spawn, in this case the new process
-							% start executing the function elect of the Module primary_node, we pass to this function
-							% no argument
-							spawn(primary_node, elect, []),
-							% (?) Ma qui il nodo secondary non va terminato
-							{noreply,{[], New_Primary_node_name, null}};
+					if 
+						is_list(Neigh_list)-> 
+							spawn(bully_algorithm, start_election_process, [Neigh_list]);
 						true ->
-							io:format("[secondary node] New primary node is ~w ~n",[New_Primary_node_name]), % DEBUG
-							% (?) Ma qui non avevamo detto che non veniva fatto l'add_to_cluster
-							Neighbours_list = add_to_cluster(New_Primary_node_name),
-							% The timer is restarted
-							erlang:send_after(?TIMEOUT_ALIVE, secondary_node, {ping_pong}),
-							Now = erlang:monotonic_time(millisecond),
-							{noreply, {[], New_Primary_node_name, Now}}
-					end
+							spawn(bully_algorithm, start_election_process, Neigh_list)
+						end,
+					{noreply,{Neigh_list, Primary_node, null}}
 			end;
 
 		_Dummy ->
@@ -243,7 +258,10 @@ get_diff([H|T],L2) ->
 		false ->
 			[H] ++ get_diff(T,L2)
 	end.
-	
+
+
+get_node_id() ->
+	Y = string:substr(atom_to_list(node()),5,2).
 	
 terminate(_Reason, _State) ->
   ok.
