@@ -171,14 +171,16 @@ handle_call(Request, From, Neigh_list) ->
 				if
 					Failed_Node_List == [] ->
 						io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]),
-						New_Neigh_list = Neigh_list ++ [{New_Neigh,Now}],
+						New_Neigh_list = lists:keysort(1, Neigh_list ++ [{New_Neigh,Now}]),
+
 						% The Returned_Node_list represent the list that is returned to the new node that wants to join the network,
 						% this list contains all the secondary nodes that already have joined the network
 						Returned_Node_list = Node_list;
 					true ->
 						io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
 						% The nodes that have failed are removed from the list of neighbour
-						New_Neigh_list= get_diff(Neigh_list ++ [{New_Neigh,Now}],Failed_Node_List),
+						New_Neigh_list = lists:keysort(get_diff(Neigh_list ++ [{New_Neigh,Now}],Failed_Node_List)),
+						
 						% In order to obtain the list of neighbours of the new node this node is subtracted
 						% from the new list of neighbours
 						Returned_Node_list = [X||{X,_} <- get_diff(New_Neigh_list, [New_Neigh])],
