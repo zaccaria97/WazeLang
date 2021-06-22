@@ -86,13 +86,13 @@ init(Neighbours_list) ->
   {ok,Neighbours_list}. 
   
 elect() ->
-	Reply =(catch gen_server:call({bully_algorithm, node()}, stop, ?CALL_TIMEOUT)),
+	Reply =(catch gen_server:call({secondary_node, node()}, stop, ?CALL_TIMEOUT)),
 	io:format("Secondary node has been terminated ~n~n"),
 	start_link([]).
   
 elect(Node_list) ->
-
-	gen_server:call({bully_algorithm, node()}, stop, ?CALL_TIMEOUT),
+	io:format("CHIAMO ELECT... ~n"), % DEBUG
+	gen_server:call({secondary_node, node()}, stop, ?CALL_TIMEOUT),
 	io:format("Secondary node has been terminated ~n~n"),
 	% Signal via TCP the information about this primary server
 	% update_primary(),
@@ -100,7 +100,7 @@ elect(Node_list) ->
 	
 	% Here the latest added point is propagated to all secondary nodes, the result of the broadcast_call
 	% is the list of nodes that have failed during the propagation of the check_db_consistency message. 
-	Query="SELECT * FROM points ORDER BY timestamp DESC LIMIT 1;",
+	Query="SELECT max_speed, type, lat, lng FROM points ORDER BY timestamp DESC LIMIT 1;",
 	
 	Node_Id = get_node_id(), 
 	odbc:start(),
