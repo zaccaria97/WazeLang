@@ -50,7 +50,7 @@ init(Primary_node) ->
 		Points_to_Add),
 
 	% Start a periodic timer exploiting the send_after function
-	erlang:send_after(?TIMEOUT_ALIVE, secondary_node, {ping_pong}), %%handled by handle_info callback
+	erlang:send_after(?TIMEOUT_ALIVE, secondary_node, {ping_pong, Primary_node}), %%handled by handle_info callback
 	Now = erlang:monotonic_time(millisecond),
 	% The state of the server is initialized and it contains:
 	% - The list of neighbours as provided by the primary node
@@ -65,11 +65,11 @@ handle_cast(Request, {Neigh_list, Primary_node, Primary_last_contact, Alive}) ->
   case Request of
   	{heartbeat,From} when is_atom(From) ->
 			% Case is an heartbeat message received from the primary node
-      io:format("[secondary node] received a heartbeat mex from primary node: ~w~n", [From]), % DEBUG
+		io:format("[secondary node] received a heartbeat mex from primary node: ~w~n", [From]), % DEBUG
 	  	Now = erlang:monotonic_time(millisecond),
 			% The secondary update its state, in particular the last time contact is updated with the current
 			% instant
-      {noreply, {Neigh_list, Primary_node, Now, Alive}};
+		{noreply, {Neigh_list, Primary_node, Now, Alive}};
 
 		%-------------------------------Merge------------------------------------------------------------------------------%
 		{leader,Leader} ->
@@ -77,30 +77,32 @@ handle_cast(Request, {Neigh_list, Primary_node, Primary_last_contact, Alive}) ->
 			Now = erlang:monotonic_time(millisecond),
 			% Update the neighbour list removing the new Leader
 			New_neigh_list = get_diff(Neigh_list,[Leader]),
+			
+			erlang:send_after(?TIMEOUT_ALIVE, secondary_node, {ping_pong, Leader}),
 			% (5) If the node receive a Vicory message it assumes that the sending node is the leader and restart the secondary node
-			{noreply, {New_neigh_list, Leader, Now, Alive}};
+			{noreply, {New_neigh_list, Leader, Now, []}};
 
 		{election,Node} ->
-			io:format("[secondary_node] Ricevuto un messaggio ELECTION ~n"),
-
-			if
-				(Node < node()) and (Primary_node =/= no_leader)->
-					%	if Primary_node == no_leader an election process is yet on going
-					% (4) Case I receive an election message from a process with lower ID w.r.t mine I have to start the election mechanism;
-					start_election(Neigh_list)
-			end,
-			gen_server:cast({secondary_node,Node},{answer,node()}),
-			{noreply,{Neigh_list,no_leader, Primary_last_contact, Alive}};
-
+			   Now = erlang:monotonic_time(millisecond),
+			   if
+				(Node < node()) and (Now - Primary_last_contact >  ?TIMEOUT_ALIVE) ->
+				 %  if Primary_node == no_leader an election process is yet on going
+				 % (4) Case I receive an election message from a process with lower ID w.r.t mine I have to start the election mechanism;
+				 start_election(Neigh_list);
+				true ->
+					io:format("[secondary_node] Messaggio di election inutile ~n")  %%DEBUG
+			   end,
+			   gen_server:cast({secondary_node,Node},{answer,node()}),
+			   {noreply,{Neigh_list,Primary_node,Primary_last_contact, Alive}};
 		{answer,Node} ->
-			New_Alive = Alive ++ Node,
-			io:format("[secondary_node] Ricevuto un messaggio answer ~n"),
-			io:format("[secondary node] Alive: ~w~n", [New_Alive]),
-			{noreply,{Neigh_list,Primary_node, null, New_Alive}};
+			   New_Alive = Alive ++ [Node],
+			%%   io:format("[secondary_node] Ricevuto un messaggio answer ~n"),
+			%%   io:format("[secondary node] Alive: ~w~n", [New_Alive]),
+			   {noreply,{Neigh_list,Primary_node,Primary_last_contact, New_Alive}};
 
 		_ ->
-      io:format("[secondary_node] WARNING: bad request format~n"),
-      {noreply, {Neigh_list, Primary_node, Primary_last_contact, Alive}}
+		  io:format("[secondary_node] WARNING: bad request format~n"),
+		  {noreply, {Neigh_list, Primary_node, Primary_last_contact, Alive}}
   end. 
  
 % (?)
@@ -188,46 +190,54 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact,Alive
 handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact,Alive}) ->
 	% The handle_info callback is for messages that don’t originate from the functions call and cast of
 	% the gen_server module. In our case is used for the timer implementation via send_after.
-  case Info of
-		{ping_pong} ->
-			% In this case the secondary check if the primary is still alive i.e. the primary has contacted
-			% the secondary in the last 2 * TIMEOUT milliseconds
-			Result = check_alives([{Primary_node,Primary_last_contact}]),
-			case Result == [] of
-				false ->
-					% Case primary is still alive
-					io:format("[secondary node] Primary node is still alive... ~n"), % DEBUG
-					io:format("----------NEIGHBOURS---------~n"),
-					% Print the neighbours information if any
-					case Neigh_list == [] of
+	Now = erlang:monotonic_time(millisecond),
+	case Info of
+		{ping_pong, Node} ->
+			
+			if 
+				Node == Primary_node ->
+					% In this case the secondary check if the primary is still alive i.e. the primary has contacted
+					% the secondary in the last 2 * TIMEOUT milliseconds
+					Result = check_alives([{Primary_node,Primary_last_contact}]),
+					case Result == [] of
 						false ->
-							lists:foreach( fun(H) -> io:format("~p~n", [H]) end, Neigh_list), %DEBUG
-							io:format("~n");
-						true ->
-							io:format("There are no secondary nodes...~n~n")
-					end,
-					% Send to the primary node the heartbeat message
-					gen_server:cast({primary_node, Primary_node}, {heartbeat,node()}),
-					% Restart the timer
-					erlang:send_after(?TIMEOUT_ALIVE, secondary_node, {ping_pong}),
-					{noreply,{Neigh_list, Primary_node, Primary_last_contact,Alive}};
+							% Case primary is still alive
+							io:format("[secondary node] Primary node is still alive... ~n"), % DEBUG
+							io:format("----------NEIGHBOURS---------~n"),
+							% Print the neighbours information if any
+							case Neigh_list == [] of
+								false ->
+									lists:foreach( fun(H) -> io:format("~p~n", [H]) end, Neigh_list), %DEBUG
+									io:format("~n");
+								true ->
+									io:format("There are no secondary nodes...~n~n")
+							end,
+							% Send to the primary node the heartbeat message
+							gen_server:cast({primary_node, Primary_node}, {heartbeat,node()}),
+							% Restart the timer
+							erlang:send_after(?TIMEOUT_ALIVE, secondary_node, {ping_pong, Primary_node}),
+							{noreply,{Neigh_list, Primary_node, Primary_last_contact,Alive}};
 
-				true ->
-					% Case the primary has failed => election mechanism must start
-					io:format("[secondary node] primary node has failed! Election mechanism is started... ~n"), % DEBUG
-					if 
-						is_list(Neigh_list)->
-							start_election(Neigh_list);
 						true ->
-							start_election([Neigh_list])
-						end,
-					{noreply,{Neigh_list, no_leader, null,Alive}}
-			end;
+							% Case the primary has failed => election mechanism must start
+							io:format("[secondary node] primary node has failed! Election mechanism is started... ~n"), % DEBUG
+							if 
+								is_list(Neigh_list)->
+									start_election(Neigh_list);
+								true ->
+									start_election([Neigh_list])
+								end,
+							{noreply,{Neigh_list, Primary_node, Primary_last_contact, []}}
+					end;
+					
+				true ->
+					{noreply,{Neigh_list, Primary_node, Primary_last_contact, Alive}}
+				end;
 
 		%-------------------------------Merge------------------------------------------------------------------------------%
 		{check_leader} ->
 			if
-				Primary_node == no_leader ->
+				Now - Primary_last_contact > ?TIMEOUT_ALIVE ->
 					% (3) No victory message received after VICTORY_TIMEOUT milliseconds the election process must be restarted
 					start_election(Neigh_list);
 				true ->
@@ -236,7 +246,7 @@ handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact,Alive}) ->
 
 		{check_election} ->
 			if
-				Primary_node == no_leader ->
+				Now - Primary_last_contact > ?TIMEOUT_ALIVE ->
 					if Alive == [] ->
 						% (2) Case no nodes reply with an answer to the election message
 						broadcast_leader(Neigh_list);
@@ -248,6 +258,7 @@ handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact,Alive}) ->
 					io:format("Already found a leader ~n")
 			end,
 			{noreply, {Neigh_list, Primary_node, Primary_last_contact,[]}};
+
 
 		_Dummy ->
       io:format("[secondary node] WARNING: bad mex format in handle_info Format ~w ~n",[_Dummy]), % DEBUG
@@ -330,6 +341,7 @@ start_election(Neighbours_list) ->
 	io:format("@@@@@Higher_id_list ~w~n",[Higher_id_list]), % DEBUG
 	if
 		Higher_id_list == [] ->
+
 			broadcast_leader(Neighbours_list),
 			spawn(primary_node, elect, [Neighbours_list]);
 
@@ -387,4 +399,4 @@ broadcast_election([]) ->
 broadcast_election([Current|Neighbours]) ->
 	% If I'm the election winner I don't have to wait any reply from the nodes
 	gen_server:cast({secondary_node,Current},{election,node()}),
-	broadcast_leader(Neighbours).
+	broadcast_election(Neighbours).
