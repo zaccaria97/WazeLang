@@ -2,7 +2,7 @@
 
 -behaviour(gen_server).
 
--export([start_link/1, restart_link/1]).
+-export([start_link/1]).
 -export([init/1, handle_call/3,handle_cast/2, handle_info/2, terminate/2]).
 -export([get_new_primary_node_id/2,get_new_primary_node_id/3, add_to_cluster/1]).
 
@@ -21,13 +21,6 @@ start_link(Primary_node) ->
 	%   is the current module
 	% - Primary_node is passed as argument to the callback function init
   gen_server:start_link({local, ?SERVER}, ?MODULE, Primary_node, []).
-
-restart_link(Primary_node) ->
-
-	gen_server:call({bully_algorithm, node()}, stop, ?CALL_TIMEOUT),
-	io:format("bully_algorithm has been terminated ~n~n"),
-	start_link(Primary_node).
-
   
 init(Primary_node) ->
 	% During the initialization phase the node must ask to the primary to add itself to the cluster of secondary nodes
@@ -78,6 +71,14 @@ handle_cast(Request, {Neigh_list, Primary_node, Primary_last_contact}) ->
 			% instant
       {noreply, {Neigh_list, Primary_node, Now}};
 
+		%-------------------------------Merge------------------------------------------------------------------------------%
+		{leader,Leader} ->
+			Now = erlang:monotonic_time(millisecond),
+			% Update the neighbour list removing the new Leader
+			New_neigh_list = get_diff(Neigh_list,Leader),
+			% (5) If the node receive a Vicory message it assumes that the sending node is the leader and restart the secondary node
+			{noreply, {New_neigh_list, Leader, Now}};
+
 		_ ->
       io:format("[secondary_node] WARNING: bad request format~n"),
       {noreply, {Neigh_list, Primary_node, Primary_last_contact}}
@@ -119,35 +120,45 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact}) ->
 			end,
 			{reply,update_neighbours_reply,{New_Neigh_list, Primary_node, Primary_last_contact}};
 
-	{add_point, Type , Lat, Lng, Max_speed}  ->
+		{add_point, Type , Lat, Lng, Max_speed}  ->
 		
-		Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
-		io:format("[secondary node] received an add_point request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
-		
-		Query="INSERT INTO points(type,lat,lng,max_speed, timestamp) VALUES ('" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', '" ++ Max_speed ++ "', NOW());",
-		
-		Node_Id = get_node_id(), 
-		odbc:start(),
-		{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
+			Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
+			io:format("[secondary node] received an add_point request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
 
-		Result=odbc:sql_query(Ref, Query),
-		io:format("[secondary node] Query result ~p~n", [Result]),  %%DEBUG
-		{reply,{add_point_reply,Result},{Neigh_list, Primary_node, Primary_last_contact}};
+			Query="INSERT INTO points(type,lat,lng,max_speed, timestamp) VALUES ('" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', '" ++ Max_speed ++ "', NOW());",
 
-	{check_db_consistency, Max_speed, Type , Lat, Lng} ->
+			Node_Id = get_node_id(),
+			odbc:start(),
+			{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
+
+			Result=odbc:sql_query(Ref, Query),
+			io:format("[secondary node] Query result ~p~n", [Result]),  %%DEBUG
+			{reply,{add_point_reply,Result},{Neigh_list, Primary_node, Primary_last_contact}};
+
+		{check_db_consistency, Max_speed, Type , Lat, Lng} ->
 	
-		Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
-		io:format("[secondary node] received a check_db_consistency request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
-		
-		Node_Id = get_node_id(), 
-		Query="INSERT INTO points(type,lat,lng,max_speed, timestamp) VALUES ('" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', '" ++ Max_speed ++ "', NOW());",
-		odbc:start(),
-		{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
-		Result=odbc:sql_query(Ref, Query),
-		
-		{reply,{check_db_consistency,Result},{Neigh_list, Primary_node, Primary_last_contact}};
-		
-    %% catch all clause
+			Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
+			io:format("[secondary node] received a check_db_consistency request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
+
+			Node_Id = get_node_id(),
+			Query="INSERT INTO points(type,lat,lng,max_speed, timestamp) VALUES ('" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', '" ++ Max_speed ++ "', NOW());",
+			odbc:start(),
+			{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
+			Result=odbc:sql_query(Ref, Query),
+
+			{reply,{check_db_consistency,Result},{Neigh_list, Primary_node, Primary_last_contact}};
+
+		%-------------------------------Merge------------------------------------------------------------------------------%
+		{election,Node} ->
+			if
+				Node < node()->
+					%(4) Case I receive an election message from a process with lower ID w.r.t mine I have to start the election mechanism;
+					start_election(Neigh_list ++ [Primary_node])
+			end,
+			{reply,answer,{Neigh_list,no_leader,null}};
+
+
+		%% catch all clause
     _ ->
       io:format("[secondary_node] WARNING: bad request format ~n"),
       {reply, bad_request, {Neigh_list, Primary_node, Primary_last_contact}}
@@ -185,12 +196,22 @@ handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact}) ->
 					% Case the primary has failed => election mechanism must start
 					io:format("[secondary node] primary node has failed! Election mechanism is started... ~n"), % DEBUG
 					if 
-						is_list(Neigh_list)-> 
-							spawn(bully_algorithm, start_election_process, [Neigh_list]);
+						is_list(Neigh_list)->
+							start_election([Neigh_list]);
 						true ->
-							spawn(bully_algorithm, start_election_process, Neigh_list)
+							start_election(Neigh_list)
 						end,
-					{noreply,{Neigh_list, Primary_node, null}}
+					{noreply,{Neigh_list, no_leader, null}}
+			end;
+
+		%-------------------------------Merge------------------------------------------------------------------------------%
+		{check_leader} ->
+			if
+				Primary_node == no_leader ->
+					% (3) No victory message received after VICTORY_TIMEOUT milliseconds the election process must be restarted
+					start_election(Neigh_list);
+				true ->
+					{noreply, {Neigh_list, Primary_node, Primary_last_contact}}
 			end;
 
 		_Dummy ->
@@ -265,3 +286,68 @@ get_node_id() ->
 	
 terminate(_Reason, _State) ->
   ok.
+
+	%-------------------------------Merge------------------------------------------------------------------------------%
+
+start_election(Neighbours_list) ->
+
+	Higher_id_list = get_neighbours_with_higher_id(Neighbours_list),
+	io:format("@@@@@Higher_id_list ~w~n",[Higher_id_list]), % DEBUG
+	if
+		Higher_id_list == [] ->
+			broadcast_leader(Neighbours_list),
+			spawn(primary_node, elect, Neighbours_list);
+
+		true ->
+			% (1) Case there are node with id greater than mine
+			Leader_Node = broadcast_election(Higher_id_list),
+			if
+				Leader_Node == no_answer ->
+					% (2) Case no nodes reply with an answer to the election message
+					broadcast_leader(Neighbours_list);
+				true ->
+					% (3) Node must wait for a victory message
+					erlang:send_after(?VICTORY_TIMEOUT, secondary_node, {check_leader})
+			end
+	end.
+
+
+get_neighbours_with_higher_id([]) ->
+	[];
+
+get_neighbours_with_higher_id(L) ->
+
+	if
+		is_list(L)->
+			Neighbours = L;
+		true ->
+			Neighbours = [L]
+	end,
+
+	Nodes_With_Higher_Id = [Neighbour || Neighbour <- Neighbours, Neighbour > node()],
+	io:format("@@@@@Nodes_With_Higher_Id ~w~n",[Nodes_With_Higher_Id]), % DEBUG
+	Nodes_With_Higher_Id.
+
+broadcast_leader([]) ->
+	ok;
+
+broadcast_leader([Current|Neighbours]) ->
+	% If I'm the election winner I don't have to wait any reply from the nodes
+	gen_server:cast({secondary_node,Current},{leader,node()}),
+	broadcast_leader(Neighbours).
+
+broadcast_election(Neighbours) ->
+	% multi_call(Nodes, Name, Request) makes a synchronous call to all gen_server processes locally
+	% registered as Name at the specified Nodes by first sending the request to every node and then
+	% waits for the replies. Where Replies is a list of {Node,Reply} and BadNodes is a list of node
+	% that either did not exist, or where the gen_server Name did not exist or did not reply.
+	{Replies,_} = gen_server:multi_call(Neighbours,secondary_node,{election,node()},?ELECTION_TIMEOUT),
+	% Gets the all the list of nodes that have replied with an answer message to the election
+	Multi_call_tuple = [Tuple || Tuple <- Replies, element(2,Tuple) == answer],
+	Alive_nodes = [Node || {_,Node} <- Multi_call_tuple],
+	if
+		Alive_nodes == [] ->
+			no_answer;
+		true ->
+			lists:max(Alive_nodes)
+	end.

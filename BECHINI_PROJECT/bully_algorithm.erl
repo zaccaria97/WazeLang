@@ -13,8 +13,8 @@
 % (2) If P receives no Answer after sending an Election message, then it broadcasts a Leader message
 % 		to all other processes and becomes the Coordinator.
 %
-% (3) If P receives an Answer from a process with a higher ID, it waits for a Victory message (if there
-% 		is no Victory message after a period of time, it restarts the process at the beginning).
+% (3) If P receives an Answer from a process with a higher ID, it waits for a Leader message (if there
+% 		is no Leader message after a period of time, it restarts the process at the beginning).
 %
 % (4) If P receives an Election message from another process with a lower ID it sends an Answer message
 % 		back and starts the election process at the beginning, by sending an Election message to
@@ -96,8 +96,7 @@ handle_info(Info,{Neighbours,Leader}) ->
 					% (3) No victory message received after VICTORY_TIMEOUT milliseconds the election process must be restarted
 					start_election(Neighbours);
 				true ->
-				
-					spawn(secondary_node, restart_link, [Leader])			
+					spawn(secondary_node, restart_link, [Leader])
 			end;
 			
 		{notify_victory} ->
@@ -163,13 +162,8 @@ get_neighbours_with_higher_id(L) ->
 		true ->
 			Neighbours = [L]
 		end,
-	
-	Nodes_id_str = [string:substr(atom_to_list(Node_name),5,2) || Node_name <- Neighbours],
-	Nodes_id_int = [list_to_integer(String_id) || String_id <- Nodes_id_str],
-	Current_Node_Id = list_to_integer(string:substr(atom_to_list(node()),5,2)),
-	io:format("@@@@@Current_Node_Id ~w~n",[Current_Node_Id]), % DEBUG
-	io:format("@@@@@Nodes_id_int ~w~n",[Nodes_id_int]), % DEBUG
-	Nodes_With_Higher_Id = [Node_id || Node_id <- Nodes_id_int, Node_id > Current_Node_Id],
+
+	Nodes_With_Higher_Id = [Neighbour || Neighbour <- Neighbours, Neighbour > node()],
 	io:format("@@@@@Nodes_With_Higher_Id ~w~n",[Nodes_With_Higher_Id]), % DEBUG
 	Nodes_With_Higher_Id.
 
