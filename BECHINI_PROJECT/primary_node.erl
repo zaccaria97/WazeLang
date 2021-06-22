@@ -121,13 +121,16 @@ elect(Node_list) ->
 			New_Node_list = Node_list;
 		true ->
 			% Otherwise the primary get the new list of neighbours
-			io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
-			New_Node_list= get_diff(Node_list,Failed_Node_List)
+			io:format("[primary_node] Following nodes have failed during check_db_consistency and will be removed: ~w ~n", [Failed_Node_List]),
+			New_Node_list= get_diff(Node_list,Failed_Node_List),
+			io:format("[primary_node] New secondary nodes list: ~w ~n", [New_Node_list]) %%DEBUG
+
 	end,
 					
 
 	Now = erlang:monotonic_time(millisecond),
 	New_Neighbours_list = [{X, Now} || X <- New_Node_list],
+	io:format("[primary_node]2 New secondary nodes list: ~w ~n", [New_Neighbours_list]),	%%DEBUG
 	start_link(New_Neighbours_list).
   
 handle_cast(Request, Neigh_list) ->
@@ -136,7 +139,7 @@ handle_cast(Request, Neigh_list) ->
   case Request of
     {heartbeat,Neigh} when is_atom(Neigh) ->
 	  	New_Neigh_list = update_last_contact(Neigh,Neigh_list),
-      {noreply, New_Neigh_list};
+      {noreply, lists:reverse(lists:keysort(1, New_Neigh_list))};
 
     %% catch all clause
     _ ->
@@ -170,8 +173,10 @@ handle_call(Request, From, Neigh_list) ->
 				Failed_Node_List = broadcast_call(Node_list,{neighbour_add_propagation,New_Neigh}),
 				if
 					Failed_Node_List == [] ->
+						io:format("[primary_node] neighbors: ~w ~n", [Neigh_list]),
 						io:format("[primary_node] Node ~w has been correctly added.~n", [New_Neigh]),
-						New_Neigh_list = lists:keysort(1, Neigh_list ++ [{New_Neigh,Now}]),
+						New_Neigh_list = lists:reverse(lists:keysort(1, Neigh_list ++ [{New_Neigh,Now}])),
+						io:format("[primary_node] sorted neighbors: ~w ~n", [New_Neigh_list]),
 
 						% The Returned_Node_list represent the list that is returned to the new node that wants to join the network,
 						% this list contains all the secondary nodes that already have joined the network
@@ -179,7 +184,7 @@ handle_call(Request, From, Neigh_list) ->
 					true ->
 						io:format("[primary_node] Following nodes have failed and will be removed: ~w ~n", [Failed_Node_List]),
 						% The nodes that have failed are removed from the list of neighbour
-						New_Neigh_list = lists:keysort(get_diff(Neigh_list ++ [{New_Neigh,Now}],Failed_Node_List)),
+						New_Neigh_list = lists:reverse(lists:keysort(1, get_diff(Neigh_list ++ [{New_Neigh,Now}],Failed_Node_List))),
 						
 						% In order to obtain the list of neighbours of the new node this node is subtracted
 						% from the new list of neighbours
@@ -199,7 +204,7 @@ handle_call(Request, From, Neigh_list) ->
 		% nodes without the nodes that sends the request, and Result is the list of nodes stored in DB. The gen_server process then continues executing
 		% updating its state with New_Neigh_list 
 		
-        {reply, {Returned_Node_list, Result}, New_Neigh_list};
+        {reply, {lists:reverse(lists:sort(Returned_Node_list)), Result}, lists:reverse(lists:keysort(1,New_Neigh_list))};
 
 		{get_map, Lat, Lng, Radius} ->
 			% This message is a request to retrieve all the points that belongs to a circle pointed in
@@ -256,10 +261,10 @@ handle_call(Request, From, Neigh_list) ->
 							% The handle_call must return {reply,Reply,NewState} so that the Reply will be given back to From as the return
 							% value of call, in this case the primary return the atom success to indicate that all the secondary have
 							% updated their database
-							{reply, success, New_Neigh_list};
+							{reply, success, lists:reverse(lists:keysort(1,New_Neigh_list))};
 						_ ->
 							io:format("[primary node] An error occured with primary node during the point addition  ...~n~n"), % DEBUG
-							{reply, error, New_Neigh_list}
+							{reply, error, lists:reverse(lists:keysort(1,New_Neigh_list))}
 					end;
 				true ->
 					io:format("[primary node] There are no secondary nodes to forward the ADD POINT operation. ~n~n") % DEBUG					
@@ -327,7 +332,7 @@ handle_info(Info, Neigh_list) ->
 
 					% Finally the state of the current server - the list of neighbour nodes alive -  is updated
 					New_Neigh_list = get_diff(Alive_Neigh_list,Failed_Node_List),
-					{noreply,	New_Neigh_list};
+					{noreply, lists:reverse(lists:keysort(1,New_Neigh_list))};
 				true ->
 					case Alive_Neigh_list == [] of
 						false ->
@@ -336,7 +341,7 @@ handle_info(Info, Neigh_list) ->
 							io:format("There are no secondary nodes...~n~n")
 					end,
 					io:format("~n"),
-					{noreply,Alive_Neigh_list}
+					{noreply,lists:reverse(lists:keysort(1, Alive_Neigh_list))}
 			end;
 
 		_Dummy ->
@@ -401,6 +406,24 @@ broadcast_call([H|T], Msg, L) ->
 				{updated,1} -> 
 					io:format("[primary node] RM ~w has correctly added the point ...~n~n", [H]), % DEBUG
 					broadcast_call(T, Msg, L);
+				_ ->
+					io:format("[primary node] An error occured with RM ~w during the point addition  ...~n~n", [H]), % DEBUG
+					% Remove H from the list of alive nodes (?)
+					broadcast_call(T, Msg, L)
+			end;
+			
+		{check_db_consistency_reply, Result} ->
+			case Result of
+		
+				{updated,1} -> 
+					io:format("[primary node] RM ~w has correctly added the point ...~n~n", [H]), % DEBUG
+					broadcast_call(T, Msg, L);
+					
+				{selected, _, _} ->
+				
+					io:format("[primary node] RM ~w 's DB is already consistent ...~n~n", [H]), % DEBUG
+					broadcast_call(T, Msg, L);
+					
 				_ ->
 					io:format("[primary node] An error occured with RM ~w during the point addition  ...~n~n", [H]), % DEBUG
 					% Remove H from the list of alive nodes (?)
