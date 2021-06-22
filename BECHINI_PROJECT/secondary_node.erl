@@ -73,13 +73,16 @@ handle_cast(Request, {Neigh_list, Primary_node, Primary_last_contact, Alive}) ->
 
 		%-------------------------------Merge------------------------------------------------------------------------------%
 		{leader,Leader} ->
+			io:format("[secondary_node] Ricevuto un messaggio LEADER da ~p~n",[Leader]),
 			Now = erlang:monotonic_time(millisecond),
 			% Update the neighbour list removing the new Leader
-			New_neigh_list = get_diff(Neigh_list,Leader),
+			New_neigh_list = get_diff(Neigh_list,[Leader]),
 			% (5) If the node receive a Vicory message it assumes that the sending node is the leader and restart the secondary node
 			{noreply, {New_neigh_list, Leader, Now, Alive}};
 
 		{election,Node} ->
+			io:format("[secondary_node] Ricevuto un messaggio ELECTION ~n"),
+
 			if
 				(Node < node()) and (Primary_node =/= no_leader)->
 					%	if Primary_node == no_leader an election process is yet on going
@@ -87,17 +90,17 @@ handle_cast(Request, {Neigh_list, Primary_node, Primary_last_contact, Alive}) ->
 					start_election(Neigh_list)
 			end,
 			gen_server:cast({secondary_node,Node},{answer,node()}),
-			{noreply,{Neigh_list,no_leader,null, Alive}};
+			{noreply,{Neigh_list,no_leader, Primary_last_contact, Alive}};
 
 		{answer,Node} ->
 			New_Alive = Alive ++ Node,
 			io:format("[secondary_node] Ricevuto un messaggio answer ~n"),
 			io:format("[secondary node] Alive: ~w~n", [New_Alive]),
-			{noreply,{Neigh_list,no_leader,null, New_Alive}};
+			{noreply,{Neigh_list,Primary_node, null, New_Alive}};
 
 		_ ->
       io:format("[secondary_node] WARNING: bad request format~n"),
-      {noreply, {Neigh_list, Primary_node, Primary_last_contact,Alive}}
+      {noreply, {Neigh_list, Primary_node, Primary_last_contact, Alive}}
   end. 
  
 % (?)
@@ -156,13 +159,24 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact,Alive
 			Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
 			io:format("[secondary node] received a check_db_consistency request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
 
+			Select_Query="SELECT * FROM points where lat = '" ++ Lat ++ "' and lng = '" ++ Lng ++ "';",
 			Node_Id = get_node_id(),
-			Query="INSERT INTO points(type,lat,lng,max_speed, timestamp) VALUES ('" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', '" ++ Max_speed ++ "', NOW());",
 			odbc:start(),
 			{ok, Ref} = odbc:connect("Driver={PostgreSQL ODBC Driver(UNICODE)};Server=127.0.0.1;Port=5432;Database=postgis" ++ Node_Id ++ ";UID=postgres;PWD=admin",[]),
-			Result=odbc:sql_query(Ref, Query),
 
-			{reply,{check_db_consistency,Result},{Neigh_list, Primary_node, Primary_last_contact,Alive}};
+			Result=odbc:sql_query(Ref, Select_Query),
+			io:format(" ~p~n",[Result]),
+			
+			if
+			element(3,Result) == [] ->
+				Insert_Query="INSERT INTO points(max_speed,type,lat,lng,timestamp) VALUES ('" ++ Max_speed ++ "', '" ++ Type ++ "', '" ++ Lat ++ "', '" ++ Lng ++ "', NOW());",
+				Result = odbc:sql_query(Ref, Insert_Query);
+			true ->
+				io:format("Point already present ~n")
+			end,
+			
+
+			{reply,{check_db_consistency_reply, Result},{Neigh_list, Primary_node, Primary_last_contact, Alive}};
 
 		%% catch all clause
     _ ->
@@ -203,9 +217,9 @@ handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact,Alive}) ->
 					io:format("[secondary node] primary node has failed! Election mechanism is started... ~n"), % DEBUG
 					if 
 						is_list(Neigh_list)->
-							start_election([Neigh_list]);
+							start_election(Neigh_list);
 						true ->
-							start_election(Neigh_list)
+							start_election([Neigh_list])
 						end,
 					{noreply,{Neigh_list, no_leader, null,Alive}}
 			end;
@@ -232,7 +246,8 @@ handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact,Alive}) ->
 					end;
 				true ->
 					io:format("Already found a leader ~n")
-			end;
+			end,
+			{noreply, {Neigh_list, Primary_node, Primary_last_contact,[]}};
 
 		_Dummy ->
       io:format("[secondary node] WARNING: bad mex format in handle_info Format ~w ~n",[_Dummy]), % DEBUG
@@ -316,7 +331,7 @@ start_election(Neighbours_list) ->
 	if
 		Higher_id_list == [] ->
 			broadcast_leader(Neighbours_list),
-			spawn(primary_node, elect, Neighbours_list);
+			spawn(primary_node, elect, [Neighbours_list]);
 
 		true ->
 			% (1) Case there are node with id greater than mine
