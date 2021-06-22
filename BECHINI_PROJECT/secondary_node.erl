@@ -65,7 +65,7 @@ handle_cast(Request, {Neigh_list, Primary_node, Primary_last_contact}) ->
   case Request of
   	{heartbeat,From} when is_atom(From) ->
 			% Case is an heartbeat message received from the primary node
-      io:format("[secondary node] received a heartbeat mex from primary node: ~w~n", [From]), % DEBUG
+		io:format("[secondary node] received a heartbeat mex from primary node: ~w~n", [From]), % DEBUG
 	  	Now = erlang:monotonic_time(millisecond),
 			% The secondary update its state, in particular the last time contact is updated with the current
 			% instant
@@ -75,7 +75,7 @@ handle_cast(Request, {Neigh_list, Primary_node, Primary_last_contact}) ->
 		{leader,Leader} ->
 			Now = erlang:monotonic_time(millisecond),
 			% Update the neighbour list removing the new Leader
-			New_neigh_list = get_diff(Neigh_list,Leader),
+			New_neigh_list = get_diff(Neigh_list,[Leader]),
 			% (5) If the node receive a Vicory message it assumes that the sending node is the leader and restart the secondary node
 			{noreply, {New_neigh_list, Leader, Now}};
 
@@ -120,7 +120,7 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact}) ->
 			end,
 			{reply,update_neighbours_reply,{New_Neigh_list, Primary_node, Primary_last_contact}};
 
-		{add_point, Type , Lat, Lng, Max_speed}  ->
+	{add_point, Type , Lat, Lng, Max_speed}  ->
 		
 			Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
 			io:format("[secondary node] received an add_point request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
@@ -135,7 +135,7 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact}) ->
 			io:format("[secondary node] Query result ~p~n", [Result]),  %%DEBUG
 			{reply,{add_point_reply,Result},{Neigh_list, Primary_node, Primary_last_contact}};
 
-		{check_db_consistency, Max_speed, Type , Lat, Lng} ->
+	{check_db_consistency, Max_speed, Type , Lat, Lng} ->
 	
 			Point="POINT(" ++ Lat ++ " " ++ Lng ++ ")",
 			io:format("[secondary node] received a check_db_consistency request. Type: ~p, Point: ~p, Max speed: ~p~n", [Type, Point, Max_speed]),  %%DEBUG
@@ -149,11 +149,11 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact}) ->
 			{reply,{check_db_consistency,Result},{Neigh_list, Primary_node, Primary_last_contact}};
 
 		%-------------------------------Merge------------------------------------------------------------------------------%
-		{election,Node} ->
+	{election,Node} ->
 			if
 				Node < node()->
 					%(4) Case I receive an election message from a process with lower ID w.r.t mine I have to start the election mechanism;
-					start_election(Neigh_list ++ [Primary_node])
+					start_election(Neigh_list)
 			end,
 			{reply,answer,{Neigh_list,no_leader,null}};
 
@@ -197,9 +197,9 @@ handle_info(Info, {Neigh_list, Primary_node, Primary_last_contact}) ->
 					io:format("[secondary node] primary node has failed! Election mechanism is started... ~n"), % DEBUG
 					if 
 						is_list(Neigh_list)->
-							start_election([Neigh_list]);
+							start_election(Neigh_list);
 						true ->
-							start_election(Neigh_list)
+							start_election([Neigh_list])
 						end,
 					{noreply,{Neigh_list, no_leader, null}}
 			end;
@@ -296,6 +296,7 @@ start_election(Neighbours_list) ->
 	if
 		Higher_id_list == [] ->
 			broadcast_leader(Neighbours_list),
+			io:format("BRODCATS LEADER ESEGUITA... ~n"), % DEBUG
 			spawn(primary_node, elect, Neighbours_list);
 
 		true ->
@@ -341,7 +342,7 @@ broadcast_election(Neighbours) ->
 	% registered as Name at the specified Nodes by first sending the request to every node and then
 	% waits for the replies. Where Replies is a list of {Node,Reply} and BadNodes is a list of node
 	% that either did not exist, or where the gen_server Name did not exist or did not reply.
-	{Replies,_} = gen_server:multi_call(Neighbours,secondary_node,{election,node()},?ELECTION_TIMEOUT),
+	{Replies,_} = gen_server:multi_call(Neighbours,secondary_node,{election,node()},5),
 	% Gets the all the list of nodes that have replied with an answer message to the election
 	Multi_call_tuple = [Tuple || Tuple <- Replies, element(2,Tuple) == answer],
 	Alive_nodes = [Node || {_,Node} <- Multi_call_tuple],
