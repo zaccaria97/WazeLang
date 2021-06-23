@@ -126,7 +126,7 @@ handle_call(Request, From, {Neigh_list, Primary_node, Primary_last_contact,Alive
 			% The handle_call must return {reply,Reply,NewState} so that the Reply will be given back to From
 			% as the return value of call, in this case the atom update_neighbours_reply is returned.
 			% The gen_server process then continues executing updating its state with just arrived node
-      {reply, update_neighbours_reply, {New_Neigh_list, Primary_node, Primary_last_contact,Alive}};
+      {reply, update_neighbours_reply, {lists:reverse(lists:sort(New_Neigh_list)), Primary_node, Primary_last_contact,Alive}};
 
     {neighbour_del_propagation, Neigh} ->
 			io:format("[secondary node] must delete the node from the neighbours: ~w~n", [Neigh]),  %%DEBUG
